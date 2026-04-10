@@ -1,0 +1,12 @@
+[package]
+distribution = "2201.13.1"
+org = "sumudunissanka"
+name = "ai.memory.redis"
+version = "0.1.0"
+license = ["Apache-2.0"]
+authors = ["Ballerina"]
+keywords = ["ai", "agent", "memory", "redis", "AI & Machine Learning"]
+repository = "https://github.com/ballerina-platform/module-ballerinax-ai.memory.redis"
+
+[platform.java21]
+graalvmCompatible = true
