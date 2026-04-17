@@ -457,14 +457,12 @@ function assertFromRedis(redis:Client cl, string key, ai:ChatMessage[] expected,
         if interactiveJsonList is redis:Error {
             test:assertFail("Failed to read interactive messages from Redis: " + interactiveJsonList.message());
         }
-        if interactiveJsonList is string[] {
-            foreach string msgJson in interactiveJsonList {
-                ChatInteractiveMessageDatabaseMessage|error dbMsg = msgJson.fromJsonStringWithType();
-                if dbMsg is error {
-                    test:assertFail("Failed to parse interactive message from Redis: " + dbMsg.message());
-                }
-                actualMessages.push(transformFromInteractiveMessageDatabaseMessage(dbMsg));
+        foreach string msgJson in interactiveJsonList {
+            ChatInteractiveMessageDatabaseMessage|error dbMsg = msgJson.fromJsonStringWithType();
+            if dbMsg is error {
+                test:assertFail("Failed to parse interactive message from Redis: " + dbMsg.message());
             }
+            actualMessages.push(transformFromInteractiveMessageDatabaseMessage(dbMsg));
         }
     }
 
@@ -842,4 +840,310 @@ function testSystemMessageRetrievalDoesNotPopulateCache() returns error? {
 
     // Retrieve all messages - should load from Redis and include K1M3
     check assertAllMessages(store, K1, [K1SM1, K1M1, k1m2, K1M3]);
+}
+
+// isFull() tests
+
+@test:Config {
+    before: cleanupKeys
+}
+function testIsFullReturnsFalseWhenEmpty() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 3);
+
+    boolean full = check store.isFull(K1);
+    test:assertFalse(full);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testIsFullReturnsFalseWhenBelowLimit() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 3);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, k1m2);
+
+    boolean full = check store.isFull(K1);
+    test:assertFalse(full);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testIsFullReturnsTrueWhenAtLimit() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 2);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, k1m2);
+
+    boolean full = check store.isFull(K1);
+    test:assertTrue(full);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testIsFullWithCache() returns error? {
+    redis:Client cl = getClient();
+    cache:CacheConfig cacheConfig = {capacity: 10, evictionFactor: 0.2};
+    ShortTermMemoryStore store = check new (cl, 2, cacheConfig);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, k1m2);
+
+    // Load into cache first
+    _ = check store.getAll(K1);
+
+    // isFull uses getChatInteractiveMessages which reads from cache
+    boolean full = check store.isFull(K1);
+    test:assertTrue(full);
+}
+
+// getCapacity() tests
+
+@test:Config {}
+function testGetCapacityReturnsDefaultValue() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    test:assertEquals(store.getCapacity(), 20);
+}
+
+@test:Config {}
+function testGetCapacityReturnsCustomValue() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 5);
+
+    test:assertEquals(store.getCapacity(), 5);
+}
+
+// Custom keyPrefix tests
+
+@test:Config {}
+function testCustomKeyPrefixStoresUnderCorrectRedisKey() returns error? {
+    redis:Client cl = getClient();
+    string customPrefix = "test_prefix";
+    ShortTermMemoryStore store = check new (cl, keyPrefix = customPrefix);
+
+    check store.put(K1, K1SM1);
+    check store.put(K1, K1M1);
+
+    string? systemJson = check cl->get(customPrefix + ":" + K1 + ":system");
+    test:assertTrue(systemJson is string);
+
+    string[] interactiveList = check cl->lRange(customPrefix + ":" + K1 + ":interactive", 0, -1);
+    test:assertEquals(interactiveList.length(), 1);
+
+    _ = check cl->del([customPrefix + ":" + K1 + ":system", customPrefix + ":" + K1 + ":interactive"]);
+}
+
+@test:Config {}
+function testTwoStoresWithDifferentPrefixesAreIsolated() returns error? {
+    redis:Client cl = getClient();
+    string prefixA = "prefix_a";
+    string prefixB = "prefix_b";
+    ShortTermMemoryStore storeA = check new (cl, keyPrefix = prefixA);
+    ShortTermMemoryStore storeB = check new (cl, keyPrefix = prefixB);
+
+    check storeA.put(K1, K1M1);
+    check storeB.put(K1, K2M1);
+
+    check assertInteractiveMessages(storeA, K1, [K1M1]);
+    check assertInteractiveMessages(storeB, K1, [K2M1]);
+
+    _ = check cl->del([prefixA + ":" + K1 + ":interactive", prefixB + ":" + K1 + ":interactive"]);
+}
+
+// maxMessagesPerKey limit enforcement tests
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutFailsWhenMaxMessagesExceeded() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 2);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, k1m2);
+
+    Error? result = store.put(K1, K1M3);
+    test:assertTrue(result is Error);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutAllFailsWhenMaxMessagesExceeded() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 2);
+
+    check store.put(K1, K1M1);
+
+    // 1 existing + 2 incoming = 3 > limit of 2
+    Error? result = store.put(K1, [k1m2, K1M3]);
+    test:assertTrue(result is Error);
+}
+
+// Operations on non-existent keys
+
+@test:Config {
+    before: cleanupKeys
+}
+function testGetAllOnNonExistentKey() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    check assertAllMessages(store, K3, []);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testRemoveAllOnNonExistentKey() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    Error? result = store.removeAll(K3);
+    test:assertTrue(result is ());
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testRemoveSystemMessageOnNonExistentKey() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    Error? result = store.removeChatSystemMessage(K3);
+    test:assertTrue(result is ());
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testRemoveInteractiveOnNonExistentKey() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    Error? result = store.removeChatInteractiveMessages(K3);
+    test:assertTrue(result is ());
+}
+
+// removeChatInteractiveMessages count edge cases
+
+@test:Config {
+    before: cleanupKeys
+}
+function testRemoveInteractiveWithCountZero() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, k1m2);
+
+    check store.removeChatInteractiveMessages(K1, 0);
+
+    check assertInteractiveMessages(store, K1, [K1M1, k1m2]);
+    check assertFromRedis(cl, K1, [K1M1, k1m2], INTERACTIVE);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testRemoveInteractiveWithCountExceedingLength() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, k1m2);
+
+    // count=10 exceeds 2 actual messages — should remove all
+    check store.removeChatInteractiveMessages(K1, 10);
+
+    check assertInteractiveMessages(store, K1, []);
+    check assertFromRedis(cl, K1, [], INTERACTIVE);
+}
+
+// put() with empty array
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutAllWithEmptyArray() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    check store.put(K1, K1M1);
+    check store.put(K1, []);
+
+    check assertAllMessages(store, K1, [K1M1]);
+    check assertFromRedis(cl, K1, [K1M1]);
+}
+
+// ai:Prompt content type tests
+
+isolated function createTestPrompt(string[] & readonly strings, anydata[] & readonly insertions)
+        returns readonly & ai:Prompt => isolated object ai:Prompt {
+    public final string[] & readonly strings = strings;
+    public final anydata[] & readonly insertions = insertions;
+};
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutAndGetUserMessageWithPromptContent() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    string[] & readonly strings = ["Hello, my name is ", "."];
+    anydata[] & readonly insertions = ["Alice"];
+    final readonly & ai:Prompt prompt = createTestPrompt(strings, insertions);
+    final readonly & ai:ChatUserMessage msgWithPrompt = {role: ai:USER, content: prompt};
+
+    check store.put(K1, msgWithPrompt);
+
+    check assertInteractiveMessages(store, K1, [msgWithPrompt]);
+    check assertFromRedis(cl, K1, [msgWithPrompt], INTERACTIVE);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutAndGetSystemMessageWithPromptContent() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    string[] & readonly strings = ["You are a ", " assistant."];
+    anydata[] & readonly insertions = ["helpful"];
+    final readonly & ai:Prompt prompt = createTestPrompt(strings, insertions);
+    final readonly & ai:ChatSystemMessage sysMsgWithPrompt = {role: ai:SYSTEM, content: prompt};
+
+    check store.put(K1, sysMsgWithPrompt);
+
+    check assertSystemMessage(store, K1, sysMsgWithPrompt);
+    check assertFromRedis(cl, K1, [sysMsgWithPrompt], SYSTEM);
+}
+
+// name field on messages
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutAndGetMessageWithNameField() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl);
+
+    final readonly & ai:ChatSystemMessage namedSystem = {role: ai:SYSTEM, content: "You are helpful.", name: "system_v2"};
+    final readonly & ai:ChatUserMessage namedUser = {role: ai:USER, content: "Hi there", name: "alice"};
+
+    check store.put(K1, namedSystem);
+    check store.put(K1, namedUser);
+
+    check assertSystemMessage(store, K1, namedSystem);
+    check assertInteractiveMessages(store, K1, [namedUser]);
+    check assertFromRedis(cl, K1, [namedSystem], SYSTEM);
+    check assertFromRedis(cl, K1, [namedUser], INTERACTIVE);
 }

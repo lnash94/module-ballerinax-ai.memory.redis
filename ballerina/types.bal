@@ -69,8 +69,12 @@ isolated function transformFromDatabaseMessage(ChatMessageDatabaseMessage dbMess
     if dbMessage is ChatSystemMessageDatabaseMessage {
         return transformFromSystemMessageDatabaseMessage(dbMessage);
     }
-
-    return transformFromInteractiveMessageDatabaseMessage(<ChatInteractiveMessageDatabaseMessage> dbMessage);
+    if dbMessage is ChatInteractiveMessageDatabaseMessage {
+        return transformFromInteractiveMessageDatabaseMessage(dbMessage);
+    }
+    // This branch is unreachable given the current ChatMessageDatabaseMessage union definition,
+    // but is required for exhaustiveness.
+    panic error("Unexpected ChatMessageDatabaseMessage type");
 }
 
 isolated function transformFromSystemMessageDatabaseMessage(ChatSystemMessageDatabaseMessage dbMessage)

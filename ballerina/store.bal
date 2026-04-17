@@ -28,7 +28,7 @@ type CachedMessages record {|
 |};
 
 # Represents a Redis-backed short-term memory store for messages.
-// @display:{label="Redis Memory Store"}
+@display{label:"Redis Short Term Memory Store"}
 public isolated class ShortTermMemoryStore {
     *ai:ShortTermMemoryStore;
 
@@ -171,7 +171,9 @@ public isolated class ShortTermMemoryStore {
     # Adds one or more chat messages to the memory store for a given key.
     #
     # + key - The key associated with the memory
-    # + message - The `ChatMessage` message or messages to store
+    # + message - The `ChatMessage` message or messages to store. If multiple
+    #             `ChatSystemMessage` values are provided in an array, only the last one is
+    #             persisted; earlier system messages in the array are discarded.
     # + return - nil on success, or an `Error` if the operation fails
     public isolated function put(string key, ai:ChatMessage|ai:ChatMessage[] message) returns Error? {
         if message is ai:ChatMessage[] {
@@ -184,17 +186,17 @@ public isolated class ShortTermMemoryStore {
                 return error("Failed to set system message: " + setResult.message(), setResult);
             }
         } else {
-            int|redis:Error currentCount = self.redisClient->lLen(self.interactiveKey(key));
-            if currentCount is redis:Error {
-                return error("Failed to get message count: " + currentCount.message(), currentCount);
-            }
-            if currentCount >= self.maxMessagesPerKey {
-                return error(string `Cannot add more messages.`
-                    + string ` Maximum limit '${self.maxMessagesPerKey}' exceeded for key '${key}'`);
-            }
             int|redis:Error pushResult = self.redisClient->rPush(self.interactiveKey(key), [dbMessage.toJsonString()]);
             if pushResult is redis:Error {
                 return error("Failed to add chat message: " + pushResult.message(), pushResult);
+            }
+            if pushResult > self.maxMessagesPerKey {
+                string|redis:Error trimResult = self.redisClient->lTrim(self.interactiveKey(key), 0, self.maxMessagesPerKey - 1);
+                if trimResult is redis:Error {
+                    self.removeCacheEntry(key);
+                }
+                return error(string `Cannot add more messages.`
+                    + string ` Maximum limit '${self.maxMessagesPerKey}' exceeded for key '${key}'`);
             }
         }
 
@@ -307,7 +309,7 @@ public isolated class ShortTermMemoryStore {
             }
         } else {
             // lTrim keeps elements from startPos to stopPos, removing others.
-            // To remove first `count` elements, keep from index `count` to -1.
+            // To remove first `count` elements, keep from index `count` to -1 (last element).
             string|redis:Error result = self.redisClient->lTrim(self.interactiveKey(key), count, -1);
             if result is redis:Error {
                 self.removeCacheEntry(key);
@@ -348,13 +350,11 @@ public isolated class ShortTermMemoryStore {
     # + key - The key associated with the memory
     # + return - true if the memory store is full, false otherwise, or an `Error` error if the operation fails
     public isolated function isFull(string key) returns boolean|Error {
-        ai:ChatInteractiveMessage[]|Error interactiveMessages = self.getChatInteractiveMessages(key);
-
-        if interactiveMessages is Error {
-            return interactiveMessages;
+        int|redis:Error count = self.redisClient->lLen(self.interactiveKey(key));
+        if count is redis:Error {
+            return error("Failed to get message count: " + count.message(), count);
         }
-
-        return interactiveMessages.length() >= self.maxMessagesPerKey;
+        return count >= self.maxMessagesPerKey;
     }
 
     private isolated function cacheFromRedis(string key)
@@ -466,9 +466,5 @@ isolated function getLatestSystemMessage(ai:ChatSystemMessage[] systemMessages)
         return;
     }
     ai:ChatSystemMessage lastSystemMessage = systemMessages[systemMessages.length() - 1];
-    readonly & ai:ChatMessage immutableMessage = mapToImmutableMessage(lastSystemMessage);
-    if immutableMessage is ai:ChatSystemMessage {
-        return immutableMessage;
-    }
-    return;
+    return <readonly & ai:ChatSystemMessage>mapToImmutableMessage(lastSystemMessage);
 }
