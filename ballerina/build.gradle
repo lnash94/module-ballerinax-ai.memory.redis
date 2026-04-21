@@ -92,7 +92,7 @@ tasks.register('startRedisServer') {
             for (int i = 0; i < retries; i++) {
                 def healthOut = new ByteArrayOutputStream()
                 exec {
-                    commandLine cmd + ["docker exec redis-store redis-cli ping"]
+                    commandLine cmd + ["docker compose -f tests/resources/compose.yaml exec redis redis-cli ping"]
                     standardOutput = healthOut
                     ignoreExitValue = true
                 }
@@ -127,7 +127,6 @@ tasks.register('stopRedisServer') {
                 standardOutput = stdOut
             }
             println stdOut.toString()
-            sleep(5 * 1000)
         } else {
             println "The Redis server is not started."
         }

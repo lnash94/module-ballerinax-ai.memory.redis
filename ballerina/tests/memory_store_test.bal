@@ -897,7 +897,7 @@ function testIsFullWithCache() returns error? {
     // Load into cache first
     _ = check store.getAll(K1);
 
-    // isFull uses getChatInteractiveMessages which reads from cache
+    // isFull reads the list length directly from Redis via LLEN, not from the cache
     boolean full = check store.isFull(K1);
     test:assertTrue(full);
 }
@@ -985,6 +985,34 @@ function testPutAllFailsWhenMaxMessagesExceeded() returns error? {
     // 1 existing + 2 incoming = 3 > limit of 2
     Error? result = store.put(K1, [k1m2, K1M3]);
     test:assertTrue(result is Error);
+}
+
+@test:Config {
+    before: cleanupKeys
+}
+function testPutAllCapacityExceededDoesNotOverwriteSystemMessage() returns error? {
+    redis:Client cl = getClient();
+    ShortTermMemoryStore store = check new (cl, 2);
+
+    // Pre-seed an existing system message and one interactive message
+    check store.put(K1, K1SM1);
+    check store.put(K1, K1M1);
+
+    // putAll with a new system message + 2 interactive messages (1 existing + 2 incoming = 3 > limit of 2)
+    final readonly & ai:ChatSystemMessage newSystem = {
+        role: ai:SYSTEM,
+        content: "You are a new system."
+    };
+    Error? result = store.put(K1, [newSystem, k1m2, K1M3]);
+    test:assertTrue(result is Error);
+
+    // System key must still hold original K1SM1 — must not be overwritten
+    check assertSystemMessage(store, K1, K1SM1);
+    check assertFromRedis(cl, K1, [K1SM1], SYSTEM);
+
+    // Interactive messages must be unchanged
+    check assertInteractiveMessages(store, K1, [K1M1]);
+    check assertFromRedis(cl, K1, [K1M1], INTERACTIVE);
 }
 
 // Operations on non-existent keys

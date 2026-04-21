@@ -8,7 +8,7 @@ This Ballerina module provides a Redis-backed short-term memory store for AI cha
 
 - **Redis-backed storage**: Persistent storage of chat messages using Redis data structures
 - **Configurable message limits**: Set the maximum number of interactive messages per session key (default: 20)
-- **In-memory caching**: Optional cache layer for improved read performance (default capacity: 20)
+- **In-memory caching**: Optional cache layer for improved read performance; disabled by default and only activated when the `cacheConfig` parameter is provided to the store initializer
 - **Flexible initialization**: Use either a connection configuration or a pre-created Redis client
 
 ## Prerequisites

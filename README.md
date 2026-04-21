@@ -84,7 +84,7 @@ import ballerinax/redis;
 
    > **Note**: Ensure that the Docker daemon is running before executing any tests.
 
-4. Export Github Personal access token with read package permissions as follows:
+4. Export a GitHub personal access token with `read:packages` permission as follows:
 
     ```bash
     export packageUser=<Username>
@@ -125,13 +125,13 @@ Execute the commands below to build from the source.
    ./gradlew clean build -PbalJavaDebug=<port>
    ```
 
-6. Publish the generated artifacts to the local Ballerina Central repository:
+6. To publish the generated artifacts to the local Ballerina Central repository:
 
     ```bash
     ./gradlew clean build -PpublishToLocalCentral=true
     ```
 
-7. Publish the generated artifacts to the Ballerina Central repository:
+7. To publish the generated artifacts to the Ballerina Central repository:
 
    ```bash
    ./gradlew clean build -PpublishToCentral=true

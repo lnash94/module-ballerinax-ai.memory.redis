@@ -194,6 +194,7 @@ public isolated class ShortTermMemoryStore {
                 string|redis:Error trimResult = self.redisClient->lTrim(self.interactiveKey(key), 0, self.maxMessagesPerKey - 1);
                 if trimResult is redis:Error {
                     self.removeCacheEntry(key);
+                    return error("Failed to trim messages after overflow: " + trimResult.message(), trimResult);
                 }
                 return error(string `Cannot add more messages.`
                     + string ` Maximum limit '${self.maxMessagesPerKey}' exceeded for key '${key}'`);
@@ -221,6 +222,24 @@ public isolated class ShortTermMemoryStore {
 
         final var [newSystemMessages, newInteractiveMessages] = partitionMessagesByType(messages);
         final readonly & ai:ChatSystemMessage? finalChatSystemMessage = getLatestSystemMessage(newSystemMessages);
+
+        // Validate interactive capacity first using LLEN before any writes,
+        // to avoid partial writes where the system message is persisted but
+        // interactive messages are rejected due to capacity.
+        if newInteractiveMessages.length() > 0 {
+            int|redis:Error currentCount = self.redisClient->lLen(self.interactiveKey(key));
+            if currentCount is redis:Error {
+                return error("Failed to get message count: " + currentCount.message(), currentCount);
+            }
+            if currentCount + newInteractiveMessages.length() > self.maxMessagesPerKey {
+                return error(string `Cannot add more messages.`
+                    + string ` Maximum limit '${self.maxMessagesPerKey}' exceeded for key '${key}'`);
+            }
+        }
+
+        // Writes only happen after capacity is confirmed.
+        // Note: SET and RPUSH are two separate calls and not atomic. Atomic execution
+        // would require MULTI/EXEC which is not currently exposed by the connector.
         if finalChatSystemMessage is ai:ChatSystemMessage {
             ChatMessageDatabaseMessage dbMessage = transformToDatabaseMessage(finalChatSystemMessage);
             string|redis:Error setResult = self.redisClient->set(self.systemKey(key), dbMessage.toJsonString());
@@ -229,17 +248,7 @@ public isolated class ShortTermMemoryStore {
             }
         }
 
-        // Insert interactive messages in batch
         if newInteractiveMessages.length() > 0 {
-            ai:ChatInteractiveMessage[] oldInteractiveMessages = check self.getChatInteractiveMessages(key);
-            int currentCount = oldInteractiveMessages.length();
-            int incoming = newInteractiveMessages.length();
-
-            if currentCount + incoming > self.maxMessagesPerKey {
-                return error(string `Cannot add more messages.`
-                    + string ` Maximum limit '${self.maxMessagesPerKey}' exceeded for key '${key}'`);
-            }
-
             string[] jsonValues = from ai:ChatInteractiveMessage msg in newInteractiveMessages
                 let ChatMessageDatabaseMessage dbMsg = transformToDatabaseMessage(msg)
                 select dbMsg.toJsonString();
@@ -301,6 +310,9 @@ public isolated class ShortTermMemoryStore {
     # if not provided, removes all messages
     # + return - nil on success, or an `Error` error if the operation fails
     public isolated function removeChatInteractiveMessages(string key, int? count = ()) returns Error? {
+        if count is int && count < 0 {
+            return error("Invalid count: must be >= 0");
+        }
         if count is () {
             int|redis:Error result = self.redisClient->del([self.interactiveKey(key)]);
             if result is redis:Error {
